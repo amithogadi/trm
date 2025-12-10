@@ -32,11 +32,10 @@ class TRM(nn.Module):
         self.puzzle_context = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
         trunc_normal_init_(self.puzzle_context, std=1.0)
 
-        # Learned initial states for z_H and z_L
-        # Shape: (1, seq_len + 1, hidden_size) - +1 for puzzle context
-        init_shape = (1, config.seq_len + 1, config.hidden_size)
-        self.H_init = nn.Parameter(trunc_normal_init_(torch.empty(init_shape), std=1.0))
-        self.L_init = nn.Parameter(trunc_normal_init_(torch.empty(init_shape), std=1.0))
+        # Initial states for z_H and z_L (NOT trainable, broadcasts to all positions)
+        # Shape: (hidden_size,) - same vector for all positions, matches original
+        self.register_buffer("H_init", trunc_normal_init_(torch.empty(config.hidden_size), std=1.0))
+        self.register_buffer("L_init", trunc_normal_init_(torch.empty(config.hidden_size), std=1.0))
 
         # Reasoner (reused for all cycles)
         self.reasoner = Reasoner(
@@ -123,8 +122,10 @@ class TRM(nn.Module):
         device = inputs.device
 
         # Initialize fresh for this batch
-        z_H = self.H_init.expand(B, -1, -1).clone()
-        z_L = self.L_init.expand(B, -1, -1).clone()
+        # H_init/L_init are (hidden_size,), broadcast to (B, seq_len+1, hidden_size)
+        seq_len_with_ctx = self.config.seq_len + 1
+        z_H = self.H_init.unsqueeze(0).unsqueeze(0).expand(B, seq_len_with_ctx, -1).clone()
+        z_L = self.L_init.unsqueeze(0).unsqueeze(0).expand(B, seq_len_with_ctx, -1).clone()
         input_emb = self._embed_inputs(inputs)
 
         # Track halting state per sequence
