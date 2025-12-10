@@ -92,27 +92,31 @@ This interleaving lets low-level reasoning inform high-level, and vice versa.
 
 ### The Reasoner
 
-The reasoner takes 3 parameters:
+The reasoner takes 2 parameters:
 
 ```python
-reasoner(hidden_states, input_injection, cos_sin)
+reasoner(hidden_states, input_injection)
 ```
 
 | Parameter | Shape | Purpose |
 |-----------|-------|---------|
 | `hidden_states` | (B, 82, 512) | The tensor being updated (z_L or z_H) |
 | `input_injection` | (B, 82, 512) | Context to add in |
-| `cos_sin` | tuple of two (82, 64) | RoPE embeddings for position info |
+
+> **Current implementation:** Attention owns RoPE internally. The original paper's
+> implementation passes `cos_sin` through Reasoner to Attention. Here, Attention
+> creates its own `RoPE(dim, seq_len)` at init and applies it to Q/K in forward.
+> This simplifies the API - no need to thread position embeddings through the call stack.
 
 Processing:
 
 ```
 hidden_states + input_injection   <- elementwise add
   │
-  ├── Attention (uses cos_sin for RoPE) + RMSNorm
+  ├── Attention (RoPE applied internally) + RMSNorm
   ├── SwiGLU MLP + RMSNorm
   │
-  ├── Attention (uses cos_sin for RoPE) + RMSNorm
+  ├── Attention (RoPE applied internally) + RMSNorm
   ├── SwiGLU MLP + RMSNorm
   │
 Output: (B, 82, 512)

@@ -1,13 +1,13 @@
-from .attention import Attention, apply_rope, rotate_half
+from .attention import Attention
 from .rmsnorm import RMSNorm
-from .rotary import RotaryEmbedding
+from .rotary import PositionEmbedding, RoPE, NoPositionEmbedding
 from .swiglu import SwiGLU
 
 __all__ = [
     "Attention",
-    "apply_rope",
-    "rotate_half",
     "RMSNorm",
-    "RotaryEmbedding",
+    "PositionEmbedding",
+    "RoPE",
+    "NoPositionEmbedding",
     "SwiGLU",
 ]
