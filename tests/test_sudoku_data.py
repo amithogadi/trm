@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from src.sudoku_dataset import SudokuDataset
+from dataset.sudoku_dataset import SudokuDataset
 
 
 @pytest.fixture(params=["train", "test"])
