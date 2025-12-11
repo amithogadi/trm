@@ -1,11 +1,9 @@
-import math
 from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.config import TRMConfig
 from src.model.reasoner import Reasoner
 
 
@@ -18,115 +16,112 @@ def trunc_normal_init_(tensor: torch.Tensor, std: float = 1.0) -> torch.Tensor:
 class TRM(nn.Module):
     """Tiny Recursive Model with Adaptive Computation Time."""
 
-    def __init__(self, config: TRMConfig):
+    def __init__(
+            self,
+            *,
+            input_dim: int = 512,
+            output_dim: int = 11,
+            context_len: int = 1,
+            seq_len: int = 128,
+            num_heads: int = 8,
+            num_layers: int = 2,
+            expansion: float = 4.0,
+            norm_eps: float = 1e-5,
+            H_cycles: int = 3,
+            L_cycles: int = 6,
+            halt_max_steps: int = 16,
+    ):
         super().__init__()
-        self.config = config
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.context_len = context_len
+        self.H_cycles = H_cycles
+        self.L_cycles = L_cycles
+        self.halt_max_steps = halt_max_steps
 
-        # Input embeddings - init with std=1/sqrt(hidden_size) so after scaling variance ≈ 1
-        self.embed_scale = math.sqrt(config.hidden_size)
-        self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        with torch.no_grad():
-            trunc_normal_init_(self.embed_tokens.weight, std=1.0 / self.embed_scale)
-
-        # Puzzle context token (prepended to sequence)
-        self.puzzle_context = nn.Parameter(torch.zeros(1, 1, config.hidden_size))
-        trunc_normal_init_(self.puzzle_context, std=1.0)
+        # Context tokens (prepended to input embeddings)
+        self.context_tokens = nn.Parameter(torch.zeros(1, context_len, input_dim))
+        trunc_normal_init_(self.context_tokens, std=1.0)
 
         # Initial states for z_H and z_L (NOT trainable, broadcasts to all positions)
-        # Shape: (hidden_size,) - same vector for all positions, matches original
-        self.register_buffer("H_init", trunc_normal_init_(torch.empty(config.hidden_size), std=1.0))
-        self.register_buffer("L_init", trunc_normal_init_(torch.empty(config.hidden_size), std=1.0))
+        self.register_buffer("H_init", trunc_normal_init_(torch.empty(input_dim), std=1.0))
+        self.register_buffer("L_init", trunc_normal_init_(torch.empty(input_dim), std=1.0))
 
         # Reasoner (reused for all cycles)
         self.reasoner = Reasoner(
-            dim=config.hidden_size,
-            seq_len=config.seq_len + 1,  # +1 for puzzle context
-            num_heads=config.num_heads,
-            num_layers=config.num_layers,
-            expansion=config.expansion,
-            norm_eps=config.norm_eps,
+            dim=input_dim,
+            seq_len=seq_len,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            expansion=expansion,
+            norm_eps=norm_eps,
         )
 
         # Output heads
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-        self.q_head = nn.Linear(config.hidden_size, 1, bias=True)
+        self.lm_head = nn.Linear(input_dim, output_dim, bias=False)
+        self.q_head = nn.Linear(input_dim, 1, bias=True)
 
         # Special initialization for q_head (encourages exploration early)
         with torch.no_grad():
             self.q_head.weight.zero_()
             self.q_head.bias.fill_(-5.0)
 
-    def _embed_inputs(self, inputs: torch.Tensor) -> torch.Tensor:
-        """Embed inputs and prepend puzzle context token.
-
-        Args:
-            inputs: (B, seq_len) token ids
-
-        Returns:
-            (B, seq_len + 1, hidden_size) embeddings with puzzle context prepended
-        """
-        B = inputs.shape[0]
-        token_emb = self.embed_tokens(inputs) * self.embed_scale
-        puzzle_ctx = self.puzzle_context.expand(B, -1, -1)
-        return torch.cat([puzzle_ctx, token_emb], dim=1)
-
     def _inner_forward(
-        self,
-        z_H: torch.Tensor,
-        z_L: torch.Tensor,
-        input_emb: torch.Tensor,
+            self,
+            z_H: torch.Tensor,
+            z_L: torch.Tensor,
+            input_emb: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run H_cycles x L_cycles reasoning with gradient truncation.
 
         Only the last H_cycle has gradients.
         """
-        H_cycles = self.config.H_cycles
-        L_cycles = self.config.L_cycles
-
         # H_cycles - 1 without gradients
         with torch.no_grad():
-            for _ in range(H_cycles - 1):
-                for _ in range(L_cycles):
+            for _ in range(self.H_cycles - 1):
+                for _ in range(self.L_cycles):
                     z_L = self.reasoner(z_L, z_H + input_emb)
                 z_H = self.reasoner(z_H, z_L)
 
         # Last H_cycle WITH gradients
-        for _ in range(L_cycles):
+        for _ in range(self.L_cycles):
             z_L = self.reasoner(z_L, z_H + input_emb)
         z_H = self.reasoner(z_H, z_L)
 
-        # Output logits (skip puzzle context token at position 0)
-        logits = self.lm_head(z_H[:, 1:])  # (B, seq_len, vocab_size)
+        # Output logits (skip context tokens)
+        logits = self.lm_head(z_H[:, self.context_len:])  # (B, seq_len, output_dim)
 
-        # Halting decision from puzzle context token
+        # Halting decision from first context token
         q_halt = self.q_head(z_H[:, 0]).squeeze(-1)  # (B,)
 
         return z_H, z_L, logits, q_halt
 
     def forward(
-        self,
-        inputs: torch.Tensor,
-        labels: Optional[torch.Tensor] = None,
+            self,
+            input_emb: torch.Tensor,
+            labels: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Run full ACT loop for a batch.
 
         Args:
-            inputs: (B, seq_len) puzzle inputs
-            labels: (B, seq_len) solutions, optional
+            input_emb: (B, seq_len, input_dim) embeddings (NO context)
+            labels: (B, seq_len) targets
 
         Returns:
-            logits: (B, seq_len, vocab_size) final predictions
+            logits: (B, seq_len, output_dim) predictions
             loss: scalar loss if labels provided, else None
         """
-        B = inputs.shape[0]
-        device = inputs.device
+        B, seq_len, _ = input_emb.shape
+        device = input_emb.device
 
-        # Initialize fresh for this batch
-        # H_init/L_init are (hidden_size,), broadcast to (B, seq_len+1, hidden_size)
-        seq_len_with_ctx = self.config.seq_len + 1
-        z_H = self.H_init.unsqueeze(0).unsqueeze(0).expand(B, seq_len_with_ctx, -1).clone()
-        z_L = self.L_init.unsqueeze(0).unsqueeze(0).expand(B, seq_len_with_ctx, -1).clone()
-        input_emb = self._embed_inputs(inputs)
+        # Prepend context tokens
+        context = self.context_tokens.expand(B, -1, -1)
+        input_emb = torch.cat([context, input_emb], dim=1)  # (B, seq_len + context_len, input_dim)
+        total_seq_len = seq_len + self.context_len
+
+        # Initialize z_H, z_L for full sequence
+        z_H = self.H_init.unsqueeze(0).unsqueeze(0).expand(B, total_seq_len, -1).clone()
+        z_L = self.L_init.unsqueeze(0).unsqueeze(0).expand(B, total_seq_len, -1).clone()
 
         # Track halting state per sequence
         halted = torch.zeros(B, dtype=torch.bool, device=device)
@@ -135,7 +130,7 @@ class TRM(nn.Module):
         num_halted = 0
 
         # Run ACT steps
-        for step in range(self.config.halt_max_steps):
+        for step in range(self.halt_max_steps):
             z_H, z_L, logits, q_halt = self._inner_forward(z_H, z_L, input_emb)
 
             # Detach z_H/z_L to isolate gradients between ACT steps (matches original)
@@ -144,7 +139,7 @@ class TRM(nn.Module):
 
             if labels is not None:
                 # Determine which sequences halt this step
-                is_last_step = (step == self.config.halt_max_steps - 1)
+                is_last_step = (step == self.halt_max_steps - 1)
                 with torch.no_grad():
                     seq_correct = (logits.argmax(-1) == labels).all(-1)
                     newly_halted = ~halted & (is_last_step | (q_halt > 0))
@@ -152,11 +147,10 @@ class TRM(nn.Module):
                 # Compute loss only for newly halted sequences
                 if newly_halted.any():
                     # LM loss for halted sequences
-                    halted_mask = newly_halted.unsqueeze(1).expand(-1, labels.shape[1])
                     halted_logits = logits[newly_halted]
                     halted_labels = labels[newly_halted]
                     lm_loss = F.cross_entropy(
-                        halted_logits.reshape(-1, self.config.vocab_size),
+                        halted_logits.reshape(-1, self.output_dim),
                         halted_labels.reshape(-1),
                         ignore_index=-100,
                     )
