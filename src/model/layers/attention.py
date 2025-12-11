@@ -5,6 +5,12 @@ import torch.nn.functional as F
 from src.model.layers.rotary import PositionEmbedding, RoPE
 
 
+def _trunc_normal_init_(tensor: torch.Tensor, std: float = 1.0) -> torch.Tensor:
+    """Initialize tensor with truncated normal distribution."""
+    nn.init.trunc_normal_(tensor, mean=0.0, std=std, a=-2 * std, b=2 * std)
+    return tensor
+
+
 class Attention(nn.Module):
     def __init__(
             self, *,
@@ -21,6 +27,14 @@ class Attention(nn.Module):
         self.k_proj = nn.Linear(dim, dim, bias=False)
         self.v_proj = nn.Linear(dim, dim, bias=False)
         self.o_proj = nn.Linear(dim, dim, bias=False)
+
+        # Initialize with trunc_normal
+        std = 1.0 / (dim ** 0.5)
+        with torch.no_grad():
+            _trunc_normal_init_(self.q_proj.weight, std=std)
+            _trunc_normal_init_(self.k_proj.weight, std=std)
+            _trunc_normal_init_(self.v_proj.weight, std=std)
+            _trunc_normal_init_(self.o_proj.weight, std=std)
 
         self.pos_emb = pos_emb or RoPE(dim=self.head_dim, seq_len=seq_len)
 

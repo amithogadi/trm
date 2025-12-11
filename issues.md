@@ -14,6 +14,9 @@
 | Token embedding variance (init std=1/sqrt(512), scale by sqrt(512)) | ✅ |
 | Gradient flow between ACT steps (detach z_H/z_L) | ✅ |
 | H_init/L_init shape (512,) broadcast + non-trainable buffer | ✅ |
+| Context token init (zero) | ✅ |
+| Linear layer init (trunc_normal) | ✅ |
+| Loss function (stablemax) | ✅ |
 
 ---
 
@@ -31,65 +34,7 @@
 
 ---
 
-### 2. Context Token Initialization
-
-**Original:**
-```python
-self.puzzle_emb = CastedSparseEmbedding(..., init_std=0, ...)  # ZERO init
-```
-
-**Ours:**
-```python
-self.context_tokens = nn.Parameter(torch.zeros(1, context_len, input_dim))
-trunc_normal_init_(self.context_tokens, std=1.0)  # Random init
-```
-
-**Impact:** HIGH - Different starting point for learned context
-
-**Fix:** Remove `trunc_normal_init_` call, keep zeros
-
----
-
-### 3. Linear Layer Initialization
-
-**Original (layers.py):**
-```python
-class CastedLinear(nn.Linear):
-    def __init__(...):
-        nn.init.trunc_normal_(self.weight, std=init_std)  # init_std = 1/sqrt(in_features)
-```
-
-**Ours:** PyTorch default uniform initialization
-
-**Impact:** HIGH - Different weight distribution affects training dynamics
-
-**Fix:** Initialize all Linear layers (lm_head, q_head, Reasoner MLP/attn projections) with `trunc_normal_(std=1/sqrt(in_features))`
-
----
-
-### 4. Loss Function
-
-**Original (losses.py):**
-```python
-def stablemax_cross_entropy(logits, labels, gamma=4):
-    logits_norm = logits - logits.max(dim=-1, keepdim=True).values  # subtract max
-    probs = torch.pow(gamma, logits_norm)  # gamma^x instead of exp(x)
-    probs = probs / probs.sum(dim=-1, keepdim=True)
-    loss = -torch.log(probs.gather(-1, labels.unsqueeze(-1)) + 1e-12)
-```
-
-**Ours:**
-```python
-F.cross_entropy(logits, labels)  # Standard softmax
-```
-
-**Impact:** HIGH - Different gradient behavior, stablemax more numerically stable
-
-**Fix:** Implement `stablemax_cross_entropy` with `gamma=4`
-
----
-
-### 5. Loss Scope - Which Sequences
+### 2. Loss Scope
 
 **Original:**
 ```python
@@ -113,7 +58,7 @@ if newly_halted.any():
 
 ---
 
-### 6. Loss Normalization
+### 3. Loss Normalization
 
 **Original:**
 ```python
@@ -134,7 +79,7 @@ loss = (total_lm_loss + 0.5 * total_q_loss) / num_halted
 
 ---
 
-### 7. q_head Output Dimension
+### 4. q_head Output Dimension
 
 **Original:**
 ```python
@@ -159,9 +104,6 @@ q_halt = self.q_head(z_H[:, 0]).squeeze(-1)  # Direct halt score
 | Issue | Impact | Status |
 |-------|--------|--------|
 | 1. Context token count (1 vs 16) | HIGH | Open |
-| 2. Context token init (random vs zero) | HIGH | Open |
-| 3. Linear layer init (uniform vs trunc_normal) | HIGH | Open |
-| 4. Loss function (softmax vs stablemax) | HIGH | Open |
-| 5. Loss scope (halted-only vs all sequences) | HIGH | Open |
-| 6. Loss normalization | MEDIUM | Open |
-| 7. q_head output dim (1 vs 2) | MEDIUM | Open |
+| 2. Loss scope (halted-only vs all sequences) | HIGH | Open |
+| 3. Loss normalization | MEDIUM | Open |
+| 4. q_head output dim (1 vs 2) | MEDIUM | Open |

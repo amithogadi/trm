@@ -13,6 +13,29 @@ def trunc_normal_init_(tensor: torch.Tensor, std: float = 1.0) -> torch.Tensor:
     return tensor
 
 
+def _stablemax(x: torch.Tensor, epsilon: float = 1e-30) -> torch.Tensor:
+    """Stablemax transformation: maps reals to positive values."""
+    return torch.where(x < 0, 1 / (1 - x + epsilon), x + 1)
+
+
+def stablemax_cross_entropy(
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        ignore_index: int = -100,
+) -> torch.Tensor:
+    """Cross entropy using stablemax instead of softmax."""
+    logits = logits.to(torch.float64)
+    s_x = _stablemax(logits)
+    log_probs = torch.log(s_x / s_x.sum(dim=-1, keepdim=True))
+
+    valid_mask = labels != ignore_index
+    safe_labels = torch.where(valid_mask, labels, 0)
+    target_log_probs = torch.gather(log_probs, dim=-1, index=safe_labels.unsqueeze(-1)).squeeze(-1)
+
+    loss = -torch.where(valid_mask, target_log_probs, torch.zeros_like(target_log_probs))
+    return loss.sum() / valid_mask.sum().clamp(min=1)
+
+
 class TRM(nn.Module):
     """Tiny Recursive Model with Adaptive Computation Time."""
 
@@ -41,7 +64,6 @@ class TRM(nn.Module):
 
         # Context tokens (prepended to input embeddings)
         self.context_tokens = nn.Parameter(torch.zeros(1, context_len, input_dim))
-        trunc_normal_init_(self.context_tokens, std=1.0)
 
         # Initial states for z_H and z_L (NOT trainable, broadcasts to all positions)
         self.register_buffer("H_init", trunc_normal_init_(torch.empty(input_dim), std=1.0))
@@ -61,8 +83,10 @@ class TRM(nn.Module):
         self.lm_head = nn.Linear(input_dim, output_dim, bias=False)
         self.q_head = nn.Linear(input_dim, 1, bias=True)
 
-        # Special initialization for q_head (encourages exploration early)
+        # Initialize linear layers with trunc_normal
         with torch.no_grad():
+            trunc_normal_init_(self.lm_head.weight, std=1.0 / (input_dim ** 0.5))
+            # Special initialization for q_head (encourages exploration early)
             self.q_head.weight.zero_()
             self.q_head.bias.fill_(-5.0)
 
@@ -146,14 +170,10 @@ class TRM(nn.Module):
 
                 # Compute loss only for newly halted sequences
                 if newly_halted.any():
-                    # LM loss for halted sequences
+                    # LM loss for halted sequences (stablemax)
                     halted_logits = logits[newly_halted]
                     halted_labels = labels[newly_halted]
-                    lm_loss = F.cross_entropy(
-                        halted_logits.reshape(-1, self.output_dim),
-                        halted_labels.reshape(-1),
-                        ignore_index=-100,
-                    )
+                    lm_loss = stablemax_cross_entropy(halted_logits, halted_labels, ignore_index=-100)
                     total_lm_loss = total_lm_loss + lm_loss * newly_halted.sum()
 
                     # Q-halt loss for halted sequences
