@@ -16,6 +16,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data_dir", type=str, default="data/train_1k")
     parser.add_argument("--split", type=str, default="eval", choices=["train", "eval"])
     parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile")
 
     return parser.parse_args()
 
@@ -31,6 +32,11 @@ def main():
 
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
+
+    if not args.no_compile:
+        print("Compiling model with torch.compile...")
+        model = torch.compile(model)
+
     model.eval()
 
     step = checkpoint.get("step", "unknown")

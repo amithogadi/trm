@@ -28,12 +28,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume_from", type=str, default=None)
     parser.add_argument("--save_every", type=int, default=1000)
 
-    parser.add_argument("--eval_interval", type=int, default=500)
-    parser.add_argument("--log_interval", type=int, default=50)
+    parser.add_argument("--eval_interval", type=int, default=1000)
+    parser.add_argument("--log_interval", type=int, default=100)
 
     parser.add_argument("--seed", type=int, default=42)
 
-    parser.add_argument("--compile", action="store_true", help="Use torch.compile")
+    parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile")
     parser.add_argument("--num_workers", type=int, default=4)
 
     parser.add_argument("--data_dir", type=str, default="data/train_1k")
@@ -246,7 +246,7 @@ def main():
 
     model = SudokuModel().to(device)
 
-    if args.compile:
+    if not args.no_compile:
         if is_main:
             print("Compiling model with torch.compile...")
         model = torch.compile(model)
