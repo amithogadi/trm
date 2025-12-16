@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume_from", type=str, default=None)
     parser.add_argument("--save_every", type=int, default=1000)
 
-    parser.add_argument("--eval_interval", type=int, default=5000)
+    parser.add_argument("--eval_interval", type=int, default=1000)
     parser.add_argument("--log_interval", type=int, default=100)
 
     parser.add_argument("--seed", type=int, default=42)
