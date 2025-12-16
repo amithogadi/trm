@@ -6,8 +6,8 @@ from torch.utils.data import Dataset
 
 
 class SudokuDataset(Dataset):
-    def __init__(self, data_dir: str = "data", split: str = "train"):
-        data_path = Path(data_dir) / split
+    def __init__(self, data_dir: str = "data", split: str | None = None):
+        data_path = Path(data_dir) / split if split else Path(data_dir)
         self.inputs = np.load(data_path / "inputs.npy", mmap_mode="r")
         self.labels = np.load(data_path / "labels.npy", mmap_mode="r")
 

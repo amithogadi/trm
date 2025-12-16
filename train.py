@@ -16,7 +16,7 @@ from src.model.sudoku import SudokuModel
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Sudoku TRM model")
 
-    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--batch_size", type=int, default=768)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=10)
     parser.add_argument("--warmup_steps", type=int, default=2000)
@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compile", action="store_true", help="Use torch.compile")
     parser.add_argument("--num_workers", type=int, default=4)
 
-    parser.add_argument("--data_dir", type=str, default="data")
+    parser.add_argument("--data_dir", type=str, default="data/train_1k")
 
     return parser.parse_args()
 
@@ -188,12 +188,16 @@ def main():
         print(f"Batch size per GPU: {args.batch_size}")
         print(f"Effective batch size: {args.batch_size * world_size}")
 
-    train_dataset = SudokuDataset(data_dir=args.data_dir, split="train")
-    test_dataset = SudokuDataset(data_dir=args.data_dir, split="test")
+    # Training data (augmented)
+    train_dataset = SudokuDataset(data_dir=args.data_dir)
+    # Eval sets (non-augmented)
+    train_eval_dataset = SudokuDataset(data_dir=args.data_dir, split="train")
+    eval_dataset = SudokuDataset(data_dir=args.data_dir, split="eval")
 
     if is_main:
-        print(f"Train dataset: {len(train_dataset)} examples")
-        print(f"Test dataset: {len(test_dataset)} examples")
+        print(f"Train dataset: {len(train_dataset)} examples (augmented)")
+        print(f"Train eval: {len(train_eval_dataset)} examples")
+        print(f"Eval: {len(eval_dataset)} examples")
 
     train_sampler = (
         DistributedSampler(
@@ -207,16 +211,8 @@ def main():
         else None
     )
 
-    test_sampler = (
-        DistributedSampler(
-            test_dataset,
-            num_replicas=world_size,
-            rank=rank,
-            shuffle=False,
-        )
-        if world_size > 1
-        else None
-    )
+    def make_eval_sampler(dataset):
+        return DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=False) if world_size > 1 else None
 
     train_loader = DataLoader(
         train_dataset,
@@ -228,10 +224,19 @@ def main():
         drop_last=True,
     )
 
-    test_loader = DataLoader(
-        test_dataset,
+    train_eval_loader = DataLoader(
+        train_eval_dataset,
         batch_size=args.batch_size,
-        sampler=test_sampler,
+        sampler=make_eval_sampler(train_eval_dataset),
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
+
+    eval_loader = DataLoader(
+        eval_dataset,
+        batch_size=args.batch_size,
+        sampler=make_eval_sampler(eval_dataset),
         shuffle=False,
         num_workers=args.num_workers,
         pin_memory=True,
@@ -305,18 +310,19 @@ def main():
                 print(f"Step {global_step} | Epoch {epoch+1}/{args.epochs} | Loss: {loss.item():.4f} | LR: {lr:.2e}")
 
             if global_step % args.eval_interval == 0:
-                metrics = evaluate(model, test_loader, device, world_size)
+                train_metrics = evaluate(model, train_eval_loader, device, world_size)
+                eval_metrics = evaluate(model, eval_loader, device, world_size)
 
                 if is_main:
                     print(
-                        f"Step {global_step} | Eval | "
-                        f"Token Acc: {metrics['token_accuracy']:.4f} | "
-                        f"Puzzle Acc: {metrics['puzzle_accuracy']:.4f}"
+                        f"Step {global_step} | "
+                        f"Train: {train_metrics['puzzle_accuracy']:.4f} | "
+                        f"Eval: {eval_metrics['puzzle_accuracy']:.4f}"
                     )
 
-                is_best = metrics["puzzle_accuracy"] > best_accuracy
+                is_best = eval_metrics["puzzle_accuracy"] > best_accuracy
                 if is_best:
-                    best_accuracy = metrics["puzzle_accuracy"]
+                    best_accuracy = eval_metrics["puzzle_accuracy"]
 
                 if is_main:
                     save_checkpoint(

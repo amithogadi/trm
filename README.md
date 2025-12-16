@@ -14,6 +14,8 @@ source .venv/bin/activate
 
 ## Download Data
 
+Downloads full dataset and creates augmented `train_1k` (1k puzzles × 1000 augmentations):
+
 ```bash
 python scripts/download_sudoku.py
 ```
@@ -21,11 +23,10 @@ python scripts/download_sudoku.py
 ## Training
 
 ```bash
-# Single GPU
-python train.py --batch_size 64 --epochs 10
+python train.py --epochs 50000 --weight_decay 1.0 --eval_interval 5000
 
 # Multi-GPU (same node)
-torchrun --nproc_per_node=4 train.py --batch_size 64 --epochs 10
+torchrun --nproc_per_node=4 train.py --epochs 50000 --weight_decay 1.0 --eval_interval 5000
 ```
 
 ## Evaluation
