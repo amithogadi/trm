@@ -145,7 +145,8 @@ def evaluate(
         inputs = inputs.to(device)
         labels = labels.to(device)
 
-        logits, _ = model(inputs)
+        with torch.autocast('cuda', dtype=torch.bfloat16):
+            logits, _ = model(inputs)
         preds = logits.argmax(dim=-1)
 
         correct_tokens += (preds == labels).sum().item()
@@ -295,7 +296,8 @@ def main():
             inputs = inputs.to(device)
             labels = labels.to(device)
 
-            logits, loss = model(inputs, labels)
+            with torch.autocast('cuda', dtype=torch.bfloat16):
+                logits, loss = model(inputs, labels)
 
             optimizer.zero_grad()
             loss.backward()
