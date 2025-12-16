@@ -18,9 +18,9 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--batch_size", type=int, default=768)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=50000)
     parser.add_argument("--warmup_steps", type=int, default=2000)
-    parser.add_argument("--weight_decay", type=float, default=0.1)
+    parser.add_argument("--weight_decay", type=float, default=1.0)
     parser.add_argument("--grad_clip", type=float, default=1.0)
     parser.add_argument("--betas", type=float, nargs=2, default=[0.9, 0.95])
 
@@ -28,7 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume_from", type=str, default=None)
     parser.add_argument("--save_every", type=int, default=1000)
 
-    parser.add_argument("--eval_interval", type=int, default=500)
+    parser.add_argument("--eval_interval", type=int, default=5000)
     parser.add_argument("--log_interval", type=int, default=100)
 
     parser.add_argument("--seed", type=int, default=42)

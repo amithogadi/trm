@@ -23,10 +23,10 @@ python scripts/download_sudoku.py
 ## Training
 
 ```bash
-python train.py --epochs 50000 --weight_decay 1.0 --eval_interval 5000
+python train.py
 
 # Multi-GPU (same node)
-torchrun --nproc_per_node=4 train.py --epochs 50000 --weight_decay 1.0 --eval_interval 5000
+torchrun --nproc_per_node=4 train.py
 ```
 
 ## Evaluation
