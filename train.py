@@ -29,6 +29,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--save_every", type=int, default=1000)
 
     parser.add_argument("--eval_interval", type=int, default=500)
+    parser.add_argument("--log_interval", type=int, default=100)
 
     parser.add_argument("--seed", type=int, default=42)
 
@@ -299,7 +300,7 @@ def main():
 
             global_step += 1
 
-            if is_main and global_step % 100 == 0:
+            if is_main and global_step % args.log_interval == 0:
                 lr = scheduler.get_last_lr()[0]
                 print(f"Step {global_step} | Epoch {epoch+1}/{args.epochs} | Loss: {loss.item():.4f} | LR: {lr:.2e}")
 
