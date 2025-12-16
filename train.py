@@ -180,6 +180,7 @@ def main():
 
     batch_size = args.global_batch_size // world_size
 
+    torch.set_float32_matmul_precision('high')
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
