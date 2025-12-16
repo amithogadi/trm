@@ -16,7 +16,7 @@ from src.model.sudoku import SudokuModel
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train Sudoku TRM model")
 
-    parser.add_argument("--batch_size", type=int, default=768)
+    parser.add_argument("--global_batch_size", type=int, default=768)
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--epochs", type=int, default=50000)
     parser.add_argument("--warmup_steps", type=int, default=2000)
@@ -28,8 +28,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--resume_from", type=str, default=None)
     parser.add_argument("--save_every", type=int, default=1000)
 
-    parser.add_argument("--eval_interval", type=int, default=1000)
-    parser.add_argument("--log_interval", type=int, default=100)
+    parser.add_argument("--eval_interval", type=int, default=500)
+    parser.add_argument("--log_interval", type=int, default=50)
 
     parser.add_argument("--seed", type=int, default=42)
 
@@ -178,6 +178,8 @@ def main():
     rank, world_size, device = setup_ddp()
     is_main = rank == 0
 
+    batch_size = args.global_batch_size // world_size
+
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
@@ -185,8 +187,8 @@ def main():
     if is_main:
         print(f"Training on {world_size} GPU(s)")
         print(f"Device: {device}")
-        print(f"Batch size per GPU: {args.batch_size}")
-        print(f"Effective batch size: {args.batch_size * world_size}")
+        print(f"Global batch size: {args.global_batch_size}")
+        print(f"Batch size per GPU: {batch_size}")
 
     # Training data (augmented)
     train_dataset = SudokuDataset(data_dir=args.data_dir)
@@ -216,7 +218,7 @@ def main():
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
         sampler=train_sampler,
         shuffle=(train_sampler is None),
         num_workers=args.num_workers,
@@ -226,7 +228,7 @@ def main():
 
     train_eval_loader = DataLoader(
         train_eval_dataset,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
         sampler=make_eval_sampler(train_eval_dataset),
         shuffle=False,
         num_workers=args.num_workers,
@@ -235,7 +237,7 @@ def main():
 
     eval_loader = DataLoader(
         eval_dataset,
-        batch_size=args.batch_size,
+        batch_size=batch_size,
         sampler=make_eval_sampler(eval_dataset),
         shuffle=False,
         num_workers=args.num_workers,
