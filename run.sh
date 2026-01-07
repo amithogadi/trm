@@ -12,7 +12,7 @@ module load NGC_container
 module load python3.13.7
 
 # Setup venv (inherits torch from system python 3.13)
-uv venv --python 3.13 --system-site-packages
+uv venv --python 3.13 --system-site-packages --clear
 uv sync --inexact
 source .venv/bin/activate
 
