@@ -4,7 +4,7 @@
 #SBATCH --gpus=2                    # Number of GPUs
 #SBATCH --cpus-per-task=8           # Number of CPU cores
 #SBATCH --mem=64G                   # Memory
-#SBATCH --time=24:00:00             # Time limit (hh:mm:ss)
+#SBATCH --time=48:00:00             # Time limit (2 days)
 #SBATCH --output=output_%j.log
 
 # Load the modules
@@ -13,7 +13,7 @@ module load python3.13.7
 
 # Setup venv (inherits torch from system python 3.13)
 uv venv --python 3.13 --system-site-packages
-uv sync
+uv sync --inexact
 source .venv/bin/activate
 
 # Download data and create augmented dataset
