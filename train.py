@@ -141,6 +141,7 @@ def evaluate(
     device: torch.device,
     world_size: int = 1,
     max_steps: int = 16,
+    max_batches: int = 100,
 ) -> dict[str, float]:
     """Evaluate model on dataloader using ACT loop."""
     model.eval()
@@ -151,7 +152,9 @@ def evaluate(
     total_puzzles = 0
     correct_puzzles = 0
 
-    for inputs, labels in dataloader:
+    for batch_idx, (inputs, labels) in enumerate(dataloader):
+        if batch_idx >= max_batches:
+            break
         inputs = inputs.to(device)
         labels = labels.to(device)
 
