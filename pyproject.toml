@@ -15,8 +15,7 @@ dependencies = [
     "pydantic",
     "pytest",
     "setuptools",
-    "tqdm",
-    "torch"
+    "tqdm"
 ]
 # torch excluded - install separately with your preferred CUDA version
 
