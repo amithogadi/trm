@@ -11,6 +11,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from src.dataset.sudoku_dataset import SudokuDataset
 from src.model.sudoku import SudokuModel
+from src.model.loss import compute_act_loss
 
 
 def parse_args() -> argparse.Namespace:
@@ -35,8 +36,6 @@ def parse_args() -> argparse.Namespace:
 
     parser.add_argument("--no-compile", action="store_true", help="Disable torch.compile")
     parser.add_argument("--num_workers", type=int, default=4)
-
-    parser.add_argument("--data_dir", type=str, default="data/train_1k")
 
     return parser.parse_args()
 
@@ -126,15 +125,26 @@ def load_checkpoint(
     }
 
 
+def get_base_model(model: nn.Module) -> nn.Module:
+    """Get the base model, unwrapping DDP/compiled wrappers."""
+    if hasattr(model, "module"):
+        return model.module
+    if hasattr(model, "_orig_mod"):
+        return model._orig_mod
+    return model
+
+
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
     dataloader: DataLoader,
     device: torch.device,
     world_size: int = 1,
+    max_steps: int = 16,
 ) -> dict[str, float]:
-    """Evaluate model on dataloader."""
+    """Evaluate model on dataloader using ACT loop."""
     model.eval()
+    base_model = get_base_model(model)
 
     total_tokens = 0
     correct_tokens = 0
@@ -145,9 +155,15 @@ def evaluate(
         inputs = inputs.to(device)
         labels = labels.to(device)
 
+        carry = base_model.initial_carry(inputs)
+
         with torch.autocast('cuda', dtype=torch.bfloat16):
-            logits, _ = model(inputs)
-        preds = logits.argmax(dim=-1)
+            for _ in range(max_steps):
+                carry, outputs = model(carry, inputs)
+                if carry.halted.all():
+                    break
+
+        preds = outputs["logits"].argmax(dim=-1)
 
         correct_tokens += (preds == labels).sum().item()
         total_tokens += labels.numel()
@@ -192,16 +208,13 @@ def main():
         print(f"Global batch size: {args.global_batch_size}")
         print(f"Batch size per GPU: {batch_size}")
 
-    # Training data (augmented)
-    train_dataset = SudokuDataset(data_dir=args.data_dir)
-    # Eval sets (non-augmented)
-    train_eval_dataset = SudokuDataset(data_dir=args.data_dir, split="train")
-    eval_dataset = SudokuDataset(data_dir=args.data_dir, split="eval")
+    # Training and eval datasets
+    train_dataset = SudokuDataset(data_dir="data", split="train")
+    eval_dataset = SudokuDataset(data_dir="data", split="test")
 
     if is_main:
-        print(f"Train dataset: {len(train_dataset)} examples (augmented)")
-        print(f"Train eval: {len(train_eval_dataset)} examples")
-        print(f"Eval: {len(eval_dataset)} examples")
+        print(f"Train dataset: {len(train_dataset)} examples")
+        print(f"Eval dataset: {len(eval_dataset)} examples")
 
     train_sampler = (
         DistributedSampler(
@@ -226,15 +239,6 @@ def main():
         num_workers=args.num_workers,
         pin_memory=True,
         drop_last=True,
-    )
-
-    train_eval_loader = DataLoader(
-        train_eval_dataset,
-        batch_size=batch_size,
-        sampler=make_eval_sampler(train_eval_dataset),
-        shuffle=False,
-        num_workers=args.num_workers,
-        pin_memory=True,
     )
 
     eval_loader = DataLoader(
@@ -283,6 +287,10 @@ def main():
 
     model.train()
     global_step = start_step
+    base_model = get_base_model(model)
+
+    # Persistent carry across batches (key architectural change)
+    carry = None
 
     for epoch in range(args.epochs):
         if train_sampler is not None:
@@ -296,8 +304,22 @@ def main():
             inputs = inputs.to(device)
             labels = labels.to(device)
 
+            # Initialize carry if None (first batch)
+            if carry is None:
+                carry = base_model.initial_carry(inputs)
+
+            # ONE ACT step per batch (matching trm_quest)
             with torch.autocast('cuda', dtype=torch.bfloat16):
-                logits, loss = model(inputs, labels)
+                carry, outputs = model(carry, inputs)
+
+            # Compute loss for ALL sequences, metrics for halted only
+            loss, metrics = compute_act_loss(
+                outputs["logits"],
+                labels,
+                outputs["q_halt_logits"],
+                carry.halted,
+                carry.steps,
+            )
 
             optimizer.zero_grad()
             loss.backward()
@@ -312,16 +334,21 @@ def main():
 
             if is_main and global_step % args.log_interval == 0:
                 lr = scheduler.get_last_lr()[0]
-                print(f"Step {global_step} | Epoch {epoch+1}/{args.epochs} | Loss: {loss.item():.4f} | LR: {lr:.2e}")
+                count = metrics["count"].item()
+                exact_acc = metrics["exact_accuracy"].item() / max(count, 1)
+                avg_steps = metrics["steps"].item() / max(count, 1)
+                print(
+                    f"Step {global_step} | Epoch {epoch+1}/{args.epochs} | "
+                    f"Loss: {loss.item():.4f} | ExactAcc: {exact_acc:.4f} | "
+                    f"AvgSteps: {avg_steps:.1f} | Halted: {count} | LR: {lr:.2e}"
+                )
 
             if global_step % args.eval_interval == 0:
-                train_metrics = evaluate(model, train_eval_loader, device, world_size)
                 eval_metrics = evaluate(model, eval_loader, device, world_size)
 
                 if is_main:
                     print(
                         f"Step {global_step} | "
-                        f"Train: {train_metrics['puzzle_accuracy']:.4f} | "
                         f"Eval: {eval_metrics['puzzle_accuracy']:.4f}"
                     )
 

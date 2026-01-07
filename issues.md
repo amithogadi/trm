@@ -22,27 +22,23 @@
 
 ---
 
-## Open Issues
+## Resolved Issues
 
-### 2. Training Loop Architecture (Critical)
+### 2. Training Loop Architecture ✅ FIXED
 
 **Original (trm_quest):**
 - Carry persists across training steps
 - Each `model.forward()` = ONE ACT iteration
 - Loss computed for ALL sequences at each step (not just halted)
-- `.backward()` called after each iteration → **16 optimizer steps per puzzle batch**
-- Sequences that halt are replaced with new puzzles via carry mechanism
+- `.backward()` called after each iteration
 
-**Ours:**
-- All 16 ACT steps in one `forward()` call
-- Loss accumulated only for newly halted sequences
-- One `.backward()` at the end → **1 optimizer step per puzzle batch**
+**Ours (NOW MATCHES):**
+- ✅ `TRM.forward(carry, input_emb)` runs ONE ACT step
+- ✅ Carry persists across batches in `train.py`
+- ✅ `compute_act_loss()` computes loss for ALL sequences
+- ✅ `.backward()` called after each batch
 
-**Impact:** CRITICAL - Fundamentally different gradient flow and optimization
-
-**Fix:** Refactor to match original: separate inner model from ACT wrapper, persist carry across training steps, compute loss at each step for all sequences
-
----
+**Verified:** Training smoke test shows loss decreasing, halting mechanism working.
 
 ---
 
@@ -51,6 +47,6 @@
 | Issue | Impact | Status |
 |-------|--------|--------|
 | 1. Context token count (1 for sudoku) | N/A | ✅ Verified correct |
-| 2. Training loop architecture (16 optim steps vs 1) | CRITICAL | Open |
-| 3. Loss normalization | MEDIUM | Subsumed by #2 |
-| 4. q_head output dim (1 vs 2) | N/A | ✅ Verified (1 is fine - sudoku uses only halt_logit, q_continue unused) |
+| 2. Training loop architecture | CRITICAL | ✅ FIXED |
+| 3. Loss normalization | MEDIUM | ✅ Subsumed by #2 |
+| 4. q_head output dim (1 vs 2) | N/A | ✅ Verified (1 is fine) |

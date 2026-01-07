@@ -68,44 +68,75 @@ class TestTRMCarry:
         assert carry.halted.tolist() == [False, True]
 
 
-class TestTRMStep:
-    """Test TRM.step() method for single ACT iteration."""
+class TestTRMForward:
+    """Test TRM.forward() method for single ACT iteration."""
 
     @pytest.fixture
     def model(self):
         return TRM(seq_len=82, input_dim=512, context_len=1)
 
-    def test_step_output_shapes(self, model):
-        """step() returns correct output shapes."""
-        carry = model.empty_carry(batch_size=2)
-        carry = model.reset_carry(torch.ones(2, dtype=torch.bool), carry)
-        input_emb = torch.randn(2, 82, 512)
+    def test_forward_output_shapes(self, model):
+        """forward() returns correct output shapes."""
+        input_emb = torch.randn(2, 81, 512)  # No context, forward adds it
+        carry = model.initial_carry(input_emb)
 
-        new_carry, logits, q_halt = model.step(carry, input_emb)
+        new_carry, outputs = model.forward(carry, input_emb)
 
-        assert new_carry.z_H.shape == (2, 82, 512)
-        assert new_carry.z_L.shape == (2, 82, 512)
-        assert logits.shape == (2, 81, 11)  # 81 = 82 - 1 context
-        assert q_halt.shape == (2,)
+        assert new_carry.inner_carry.z_H.shape == (2, 82, 512)
+        assert new_carry.inner_carry.z_L.shape == (2, 82, 512)
+        assert outputs["logits"].shape == (2, 81, 11)
+        assert outputs["q_halt_logits"].shape == (2,)
+        assert new_carry.steps.shape == (2,)
+        assert new_carry.halted.shape == (2,)
 
-    def test_step_carry_is_detached(self, model):
-        """step() returns carry with detached tensors."""
-        carry = model.empty_carry(batch_size=2)
-        carry = model.reset_carry(torch.ones(2, dtype=torch.bool), carry)
-        input_emb = torch.randn(2, 82, 512)
+    def test_forward_carry_is_detached(self, model):
+        """forward() returns carry with detached tensors."""
+        input_emb = torch.randn(2, 81, 512)
+        carry = model.initial_carry(input_emb)
 
-        new_carry, _, _ = model.step(carry, input_emb)
+        new_carry, _ = model.forward(carry, input_emb)
 
-        assert not new_carry.z_H.requires_grad
-        assert not new_carry.z_L.requires_grad
+        assert not new_carry.inner_carry.z_H.requires_grad
+        assert not new_carry.inner_carry.z_L.requires_grad
 
-    def test_step_q_halt_initial_value(self, model):
-        """step() q_halt starts near -5 due to bias initialization."""
-        carry = model.empty_carry(batch_size=2)
-        carry = model.reset_carry(torch.ones(2, dtype=torch.bool), carry)
-        input_emb = torch.randn(2, 82, 512)
+    def test_forward_q_halt_initial_value(self, model):
+        """forward() q_halt starts near -5 due to bias initialization."""
+        input_emb = torch.randn(2, 81, 512)
+        carry = model.initial_carry(input_emb)
 
-        _, _, q_halt = model.step(carry, input_emb)
+        _, outputs = model.forward(carry, input_emb)
 
         # q_head bias is -5, so initial q_halt should be around -5
-        assert torch.all(q_halt < 0), "Initial q_halt should be negative (model starts not halting)"
+        assert torch.all(outputs["q_halt_logits"] < 0), "Initial q_halt should be negative"
+
+    def test_initial_carry_halted_true(self, model):
+        """initial_carry() starts with halted=True to trigger reset."""
+        input_emb = torch.randn(2, 81, 512)
+        carry = model.initial_carry(input_emb)
+
+        assert torch.all(carry.halted), "Initial carry should have halted=True"
+        assert torch.all(carry.steps == 0), "Initial carry should have steps=0"
+
+    def test_forward_increments_steps(self, model):
+        """forward() increments step count."""
+        model.eval()  # Disable exploration
+        input_emb = torch.randn(2, 81, 512)
+        carry = model.initial_carry(input_emb)
+
+        carry, _ = model.forward(carry, input_emb)
+        assert torch.all(carry.steps == 1)
+
+        carry, _ = model.forward(carry, input_emb)
+        assert torch.all(carry.steps == 2)
+
+    def test_forward_halts_at_max_steps(self, model):
+        """forward() halts when max_steps reached."""
+        model.eval()  # Disable exploration
+        input_emb = torch.randn(2, 81, 512)
+        carry = model.initial_carry(input_emb)
+
+        # Run until max_steps (16)
+        for _ in range(16):
+            carry, _ = model.forward(carry, input_emb)
+
+        assert torch.all(carry.halted), "All sequences should halt at max_steps"

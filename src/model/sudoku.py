@@ -1,10 +1,8 @@
-from typing import Optional
-
 import torch
 import torch.nn as nn
 
 from src.model.embedder import InputEmbedder
-from src.model.trm import TRM
+from src.model.trm import TRM, TRMCarry
 
 
 class SudokuModel(nn.Module):
@@ -40,19 +38,27 @@ class SudokuModel(nn.Module):
             halt_max_steps=halt_max_steps,
         )
 
+    def initial_carry(self, inputs: torch.Tensor) -> TRMCarry:
+        """Create initial carry state for a batch."""
+        input_emb = self.embedder(inputs)
+        return self.trm.initial_carry(input_emb)
+
     def forward(
             self,
+            carry: TRMCarry,
             inputs: torch.Tensor,
-            labels: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """
+            halt_exploration_prob: float = 0.1,
+    ) -> tuple[TRMCarry, dict[str, torch.Tensor]]:
+        """Run ONE ACT step.
+
         Args:
+            carry: Current carry state
             inputs: (B, seq_len) token ids
-            labels: (B, seq_len) solutions, optional
+            halt_exploration_prob: Exploration probability (training only)
 
         Returns:
-            logits: (B, seq_len, vocab_size)
-            loss: scalar if labels, else None
+            new_carry: Updated carry with halting status
+            outputs: Dict with 'logits' and 'q_halt_logits'
         """
         input_emb = self.embedder(inputs)
-        return self.trm(input_emb, labels)
+        return self.trm(carry, input_emb, halt_exploration_prob)

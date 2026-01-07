@@ -1,9 +1,7 @@
 from dataclasses import dataclass
-from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from src.model.reasoner import Reasoner
 
@@ -124,14 +122,18 @@ class TRM(nn.Module):
         z_L = torch.where(reset_flag.view(-1, 1, 1), L_init, carry.z_L)
         return TRMInnerCarry(z_H=z_H, z_L=z_L)
 
-    def step(
+    def _input_embeddings(self, input_emb: torch.Tensor) -> torch.Tensor:
+        """Prepend context tokens to input embeddings."""
+        B = input_emb.shape[0]
+        context = self.context_tokens.expand(B, -1, -1)
+        return torch.cat([context, input_emb], dim=1)
+
+    def _inner_step(
             self,
             carry: TRMInnerCarry,
             input_emb: torch.Tensor,
     ) -> tuple[TRMInnerCarry, torch.Tensor, torch.Tensor]:
         """Run ONE ACT iteration (H_cycles x L_cycles reasoning).
-
-        This matches trm_quest's TRMInner.forward() signature.
 
         Args:
             carry: Current carry state (z_H, z_L)
@@ -167,107 +169,62 @@ class TRM(nn.Module):
 
         return new_carry, logits, q_halt_logits
 
-    def _inner_forward(
-            self,
-            z_H: torch.Tensor,
-            z_L: torch.Tensor,
-            input_emb: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Run H_cycles x L_cycles reasoning with gradient truncation.
+    def initial_carry(self, inputs: torch.Tensor) -> TRMCarry:
+        """Create initial carry state for a batch.
 
-        Only the last H_cycle has gradients.
+        Args:
+            inputs: (B, seq_len) or (B, seq_len, dim) - used only for batch size/device
+
+        Returns:
+            TRMCarry with halted=True (triggers reset on first forward)
         """
-        # H_cycles - 1 without gradients
-        with torch.no_grad():
-            for _ in range(self.H_cycles - 1):
-                for _ in range(self.L_cycles):
-                    z_L = self.reasoner(z_L, z_H + input_emb)
-                z_H = self.reasoner(z_H, z_L)
-
-        # Last H_cycle WITH gradients
-        for _ in range(self.L_cycles):
-            z_L = self.reasoner(z_L, z_H + input_emb)
-        z_H = self.reasoner(z_H, z_L)
-
-        # Output logits (skip context tokens)
-        logits = self.lm_head(z_H[:, self.context_len:])  # (B, seq_len, output_dim)
-
-        # Halting decision from first context token
-        q_halt = self.q_head(z_H[:, 0]).squeeze(-1)  # (B,)
-
-        return z_H, z_L, logits, q_halt
+        batch_size = inputs.shape[0]
+        device = inputs.device
+        inner = self.empty_carry(batch_size)
+        steps = torch.zeros(batch_size, dtype=torch.int32, device=device)
+        halted = torch.ones(batch_size, dtype=torch.bool, device=device)
+        return TRMCarry(inner, steps, halted)
 
     def forward(
             self,
+            carry: TRMCarry,
             input_emb: torch.Tensor,
-            labels: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Run full ACT loop for a batch.
+            halt_exploration_prob: float = 0.1,
+    ) -> tuple[TRMCarry, dict[str, torch.Tensor]]:
+        """Run ONE ACT step, matching trm_quest's TRM.forward().
 
         Args:
+            carry: Current carry state (inner_carry, steps, halted)
             input_emb: (B, seq_len, input_dim) embeddings (NO context)
-            labels: (B, seq_len) targets
+            halt_exploration_prob: Probability of exploration (training only)
 
         Returns:
-            logits: (B, seq_len, output_dim) predictions
-            loss: scalar loss if labels provided, else None
+            new_carry: Updated carry with halting status
+            outputs: Dict with 'logits' and 'q_halt_logits'
         """
-        B, seq_len, _ = input_emb.shape
-        device = input_emb.device
+        # Reset carry for halted sequences (new puzzles)
+        new_inner = self.reset_carry(carry.halted, carry.inner_carry)
+        new_steps = torch.where(carry.halted, torch.zeros_like(carry.steps), carry.steps)
 
-        # Prepend context tokens
-        context = self.context_tokens.expand(B, -1, -1)
-        input_emb = torch.cat([context, input_emb], dim=1)  # (B, seq_len + context_len, input_dim)
-        total_seq_len = seq_len + self.context_len
+        # Prepend context and run one step
+        input_with_context = self._input_embeddings(input_emb)
+        new_inner, logits, q_halt_logits = self._inner_step(new_inner, input_with_context)
 
-        # Initialize z_H, z_L for full sequence
-        z_H = self.H_init.unsqueeze(0).unsqueeze(0).expand(B, total_seq_len, -1).clone()
-        z_L = self.L_init.unsqueeze(0).unsqueeze(0).expand(B, total_seq_len, -1).clone()
+        outputs = {"logits": logits, "q_halt_logits": q_halt_logits}
 
-        # Track halting state per sequence
-        halted = torch.zeros(B, dtype=torch.bool, device=device)
-        total_lm_loss = torch.tensor(0.0, device=device)
-        total_q_loss = torch.tensor(0.0, device=device)
-        num_halted = 0
+        # Compute halting (no gradients)
+        with torch.no_grad():
+            new_steps = new_steps + 1
+            is_last_step = new_steps >= self.halt_max_steps
+            halted = is_last_step
 
-        # Run ACT steps
-        for step in range(self.halt_max_steps):
-            z_H, z_L, logits, q_halt = self._inner_forward(z_H, z_L, input_emb)
+            if self.training and self.halt_max_steps > 1:
+                halted = halted | (q_halt_logits > 0)
+                # Exploration: randomly delay halting
+                exploration = torch.rand_like(q_halt_logits)
+                min_halt_steps = (exploration < halt_exploration_prob) * torch.randint_like(
+                    new_steps, 2, self.halt_max_steps + 1
+                )
+                halted = halted & (new_steps >= min_halt_steps)
 
-            # Detach z_H/z_L to isolate gradients between ACT steps (matches original)
-            z_H = z_H.detach()
-            z_L = z_L.detach()
-
-            if labels is not None:
-                # Determine which sequences halt this step
-                is_last_step = (step == self.halt_max_steps - 1)
-                with torch.no_grad():
-                    seq_correct = (logits.argmax(-1) == labels).all(-1)
-                    newly_halted = ~halted & (is_last_step | (q_halt > 0))
-
-                # Compute loss only for newly halted sequences
-                if newly_halted.any():
-                    # LM loss for halted sequences (stablemax)
-                    halted_logits = logits[newly_halted]
-                    halted_labels = labels[newly_halted]
-                    lm_loss = stablemax_cross_entropy(halted_logits, halted_labels, ignore_index=-100)
-                    total_lm_loss = total_lm_loss + lm_loss * newly_halted.sum()
-
-                    # Q-halt loss for halted sequences
-                    q_loss = F.binary_cross_entropy_with_logits(
-                        q_halt[newly_halted],
-                        seq_correct[newly_halted].float(),
-                        reduction="sum",
-                    )
-                    total_q_loss = total_q_loss + q_loss
-
-                    num_halted += newly_halted.sum().item()
-                    halted = halted | newly_halted
-
-        # Average loss over halted sequences
-        if labels is not None and num_halted > 0:
-            loss = (total_lm_loss + 0.5 * total_q_loss) / num_halted
-        else:
-            loss = None
-
-        return logits, loss
+        return TRMCarry(new_inner, new_steps, halted), outputs
