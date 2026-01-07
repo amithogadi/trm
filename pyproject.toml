@@ -16,6 +16,7 @@ dependencies = [
     "pytest",
     "setuptools",
     "tqdm",
+    "torch"
 ]
 # torch excluded - install separately with your preferred CUDA version
 

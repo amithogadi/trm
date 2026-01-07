@@ -17,85 +17,32 @@
 | Context token init (zero) | ✅ |
 | Linear layer init (trunc_normal) | ✅ |
 | Loss function (stablemax) | ✅ |
+| Context token count (1 for sudoku) | ✅ |
+| q_head output dim (1 is fine - sudoku uses only halt_logit) | ✅ |
 
 ---
 
 ## Open Issues
 
-### 1. Context Token Count
+### 2. Training Loop Architecture (Critical)
 
-**Original:** `puzzle_emb_len: 16` → 16 context tokens prepended
-
-**Ours:** `context_len: 1` → 1 context token prepended
-
-**Impact:** HIGH - Total sequence length differs (97 vs 82), affects RoPE frequencies
-
-**Fix:** Change default `context_len=16`
-
----
-
-### 2. Loss Scope
-
-**Original:**
-```python
-# Every step, compute loss for ALL sequences
-lm_loss = stablemax_cross_entropy(logits, labels)  # All B sequences
-q_loss = F.binary_cross_entropy_with_logits(q_halt, (logits.argmax(-1) == labels).all(-1).float())
-```
+**Original (trm_quest):**
+- Carry persists across training steps
+- Each `model.forward()` = ONE ACT iteration
+- Loss computed for ALL sequences at each step (not just halted)
+- `.backward()` called after each iteration → **16 optimizer steps per puzzle batch**
+- Sequences that halt are replaced with new puzzles via carry mechanism
 
 **Ours:**
-```python
-# Only compute loss for NEWLY HALTED sequences
-if newly_halted.any():
-    halted_logits = logits[newly_halted]  # Only halted ones
-    halted_labels = labels[newly_halted]
-    lm_loss = F.cross_entropy(halted_logits, halted_labels)
-```
+- All 16 ACT steps in one `forward()` call
+- Loss accumulated only for newly halted sequences
+- One `.backward()` at the end → **1 optimizer step per puzzle batch**
 
-**Impact:** HIGH - Different training signal: original trains all sequences every step, ours only at halt time
+**Impact:** CRITICAL - Fundamentally different gradient flow and optimization
 
-**Fix:** Compute loss for all sequences at each step, accumulate weighted by step
+**Fix:** Refactor to match original: separate inner model from ACT wrapper, persist carry across training steps, compute loss at each step for all sequences
 
 ---
-
-### 3. Loss Normalization
-
-**Original:**
-```python
-# Weighted average across steps
-total_loss = sum(step_losses) / halt_max_steps
-# Each step loss is mean over all B sequences
-```
-
-**Ours:**
-```python
-# Sum losses only for halted, divide by num_halted
-loss = (total_lm_loss + 0.5 * total_q_loss) / num_halted
-```
-
-**Impact:** MEDIUM - Different effective learning rate per sequence
-
-**Fix:** Match original: average over steps, each step averages over batch
-
----
-
-### 4. q_head Output Dimension
-
-**Original:**
-```python
-self.q_head = CastedLinear(dim, 2, ...)  # 2 outputs: [halt_logit, continue_logit]
-q_halt = q_head_out[:, 0] - q_head_out[:, 1]  # halt decision = halt - continue
-```
-
-**Ours:**
-```python
-self.q_head = nn.Linear(input_dim, 1, bias=True)  # 1 output
-q_halt = self.q_head(z_H[:, 0]).squeeze(-1)  # Direct halt score
-```
-
-**Impact:** MEDIUM - Mathematically similar but different parameterization
-
-**Fix:** Change q_head to output 2, compute `q_halt = out[:, 0] - out[:, 1]`
 
 ---
 
@@ -103,7 +50,7 @@ q_halt = self.q_head(z_H[:, 0]).squeeze(-1)  # Direct halt score
 
 | Issue | Impact | Status |
 |-------|--------|--------|
-| 1. Context token count (1 vs 16) | HIGH | Open |
-| 2. Loss scope (halted-only vs all sequences) | HIGH | Open |
-| 3. Loss normalization | MEDIUM | Open |
-| 4. q_head output dim (1 vs 2) | MEDIUM | Open |
+| 1. Context token count (1 for sudoku) | N/A | ✅ Verified correct |
+| 2. Training loop architecture (16 optim steps vs 1) | CRITICAL | Open |
+| 3. Loss normalization | MEDIUM | Subsumed by #2 |
+| 4. q_head output dim (1 vs 2) | N/A | ✅ Verified (1 is fine - sudoku uses only halt_logit, q_continue unused) |

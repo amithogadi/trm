@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from typing import Optional
 
 import torch
@@ -5,6 +6,21 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.model.reasoner import Reasoner
+
+
+@dataclass
+class TRMInnerCarry:
+    """Carry state for the inner TRM model (z_H, z_L tensors)."""
+    z_H: torch.Tensor
+    z_L: torch.Tensor
+
+
+@dataclass
+class TRMCarry:
+    """Carry state for the outer TRM with ACT."""
+    inner_carry: TRMInnerCarry
+    steps: torch.Tensor
+    halted: torch.Tensor
 
 
 def trunc_normal_init_(tensor: torch.Tensor, std: float = 1.0) -> torch.Tensor:
@@ -58,6 +74,7 @@ class TRM(nn.Module):
         self.input_dim = input_dim
         self.output_dim = output_dim
         self.context_len = context_len
+        self.seq_len = seq_len  # total seq_len passed to reasoner (includes context)
         self.H_cycles = H_cycles
         self.L_cycles = L_cycles
         self.halt_max_steps = halt_max_steps
@@ -89,6 +106,66 @@ class TRM(nn.Module):
             # Special initialization for q_head (encourages exploration early)
             self.q_head.weight.zero_()
             self.q_head.bias.fill_(-5.0)
+
+    def empty_carry(self, batch_size: int) -> TRMInnerCarry:
+        """Create an empty carry state for a batch."""
+        device = self.H_init.device
+        shape = (batch_size, self.seq_len, self.input_dim)
+        return TRMInnerCarry(
+            z_H=torch.empty(shape, device=device),
+            z_L=torch.empty(shape, device=device),
+        )
+
+    def reset_carry(self, reset_flag: torch.Tensor, carry: TRMInnerCarry) -> TRMInnerCarry:
+        """Reset carry state for sequences where reset_flag is True."""
+        H_init = self.H_init.unsqueeze(0).unsqueeze(0).expand_as(carry.z_H)
+        L_init = self.L_init.unsqueeze(0).unsqueeze(0).expand_as(carry.z_L)
+        z_H = torch.where(reset_flag.view(-1, 1, 1), H_init, carry.z_H)
+        z_L = torch.where(reset_flag.view(-1, 1, 1), L_init, carry.z_L)
+        return TRMInnerCarry(z_H=z_H, z_L=z_L)
+
+    def step(
+            self,
+            carry: TRMInnerCarry,
+            input_emb: torch.Tensor,
+    ) -> tuple[TRMInnerCarry, torch.Tensor, torch.Tensor]:
+        """Run ONE ACT iteration (H_cycles x L_cycles reasoning).
+
+        This matches trm_quest's TRMInner.forward() signature.
+
+        Args:
+            carry: Current carry state (z_H, z_L)
+            input_emb: (B, seq_len + context_len, input_dim) embeddings WITH context
+
+        Returns:
+            new_carry: Updated carry with detached z_H, z_L
+            logits: (B, seq_len, output_dim) predictions (context stripped)
+            q_halt_logits: (B,) halting scores
+        """
+        z_H, z_L = carry.z_H, carry.z_L
+
+        # H_cycles - 1 without gradients
+        with torch.no_grad():
+            for _ in range(self.H_cycles - 1):
+                for _ in range(self.L_cycles):
+                    z_L = self.reasoner(z_L, z_H + input_emb)
+                z_H = self.reasoner(z_H, z_L)
+
+        # Last H_cycle WITH gradients
+        for _ in range(self.L_cycles):
+            z_L = self.reasoner(z_L, z_H + input_emb)
+        z_H = self.reasoner(z_H, z_L)
+
+        # Create new carry with detached tensors (matches trm_quest)
+        new_carry = TRMInnerCarry(z_H=z_H.detach(), z_L=z_L.detach())
+
+        # Output logits (skip context tokens)
+        logits = self.lm_head(z_H[:, self.context_len:])
+
+        # Halting decision from first context token
+        q_halt_logits = self.q_head(z_H[:, 0]).squeeze(-1)
+
+        return new_carry, logits, q_halt_logits
 
     def _inner_forward(
             self,
