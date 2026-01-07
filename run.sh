@@ -21,4 +21,5 @@ python scripts/download_sudoku.py
 
 # Run training with auto-detected GPU count
 NUM_GPUS=$(python -c "import torch; print(torch.cuda.device_count())")
-torchrun --nproc_per_node=$NUM_GPUS train.py
+MASTER_PORT=$(python -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
+torchrun --standalone --nproc_per_node=$NUM_GPUS --master_port=$MASTER_PORT train.py
