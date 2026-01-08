@@ -19,6 +19,8 @@ class TRMCarry:
     inner_carry: TRMInnerCarry
     steps: torch.Tensor
     halted: torch.Tensor
+    current_inputs: torch.Tensor
+    current_labels: torch.Tensor
 
 
 def trunc_normal_init_(tensor: torch.Tensor, std: float = 1.0) -> torch.Tensor:
@@ -169,11 +171,12 @@ class TRM(nn.Module):
 
         return new_carry, logits, q_halt_logits
 
-    def initial_carry(self, inputs: torch.Tensor) -> TRMCarry:
+    def initial_carry(self, inputs: torch.Tensor, labels: torch.Tensor) -> TRMCarry:
         """Create initial carry state for a batch.
 
         Args:
-            inputs: (B, seq_len) or (B, seq_len, dim) - used only for batch size/device
+            inputs: (B, seq_len) or (B, seq_len, dim) - input embeddings
+            labels: (B, seq_len) - target labels
 
         Returns:
             TRMCarry with halted=True (triggers reset on first forward)
@@ -183,31 +186,41 @@ class TRM(nn.Module):
         inner = self.empty_carry(batch_size)
         steps = torch.zeros(batch_size, dtype=torch.int32, device=device)
         halted = torch.ones(batch_size, dtype=torch.bool, device=device)
-        return TRMCarry(inner, steps, halted)
+        current_inputs = torch.empty_like(inputs)
+        current_labels = torch.empty_like(labels)
+        return TRMCarry(inner, steps, halted, current_inputs, current_labels)
 
     def forward(
             self,
             carry: TRMCarry,
             input_emb: torch.Tensor,
+            labels: torch.Tensor,
             halt_exploration_prob: float = 0.1,
     ) -> tuple[TRMCarry, dict[str, torch.Tensor]]:
         """Run ONE ACT step, matching trm_quest's TRM.forward().
 
         Args:
-            carry: Current carry state (inner_carry, steps, halted)
-            input_emb: (B, seq_len, input_dim) embeddings (NO context)
+            carry: Current carry state (inner_carry, steps, halted, current_inputs, current_labels)
+            input_emb: (B, seq_len, input_dim) embeddings (NO context) - new batch data
+            labels: (B, seq_len) - new batch labels
             halt_exploration_prob: Probability of exploration (training only)
 
         Returns:
-            new_carry: Updated carry with halting status
+            new_carry: Updated carry with halting status and persisted inputs/labels
             outputs: Dict with 'logits' and 'q_halt_logits'
         """
         # Reset carry for halted sequences (new puzzles)
         new_inner = self.reset_carry(carry.halted, carry.inner_carry)
         new_steps = torch.where(carry.halted, torch.zeros_like(carry.steps), carry.steps)
 
-        # Prepend context and run one step
-        input_with_context = self._input_embeddings(input_emb)
+        # Update current_inputs/labels: halted sequences get new data, non-halted keep old
+        halted_view = carry.halted.view(-1, 1, 1) if input_emb.ndim == 3 else carry.halted.view(-1, 1)
+        new_current_inputs = torch.where(halted_view, input_emb, carry.current_inputs)
+        halted_view_labels = carry.halted.view(-1, 1)
+        new_current_labels = torch.where(halted_view_labels, labels, carry.current_labels)
+
+        # Prepend context and run one step using CURRENT inputs (not raw batch)
+        input_with_context = self._input_embeddings(new_current_inputs)
         new_inner, logits, q_halt_logits = self._inner_step(new_inner, input_with_context)
 
         outputs = {"logits": logits, "q_halt_logits": q_halt_logits}
@@ -227,4 +240,4 @@ class TRM(nn.Module):
                 )
                 halted = halted & (new_steps >= min_halt_steps)
 
-        return TRMCarry(new_inner, new_steps, halted), outputs
+        return TRMCarry(new_inner, new_steps, halted, new_current_inputs, new_current_labels), outputs

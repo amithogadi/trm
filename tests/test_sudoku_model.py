@@ -25,24 +25,28 @@ class TestSudokuModelIntegration:
     def test_initial_carry_and_forward(self, model):
         """Model can create carry and run forward."""
         inputs = torch.randint(0, 10, (2, 81))
+        labels = torch.randint(1, 10, (2, 81))
 
-        carry = model.initial_carry(inputs)
-        carry, outputs = model(carry, inputs)
+        carry = model.initial_carry(inputs, labels)
+        carry, outputs = model(carry, inputs, labels)
 
         assert outputs["logits"].shape == (2, 81, 11)
         assert outputs["q_halt_logits"].shape == (2,)
+        assert carry.current_inputs.shape == (2, 81, 64)  # hidden_size=64
+        assert carry.current_labels.shape == (2, 81)
 
     def test_multi_step_inference(self, model):
         """Model can run multiple steps until halting."""
         model.eval()
         inputs = torch.randint(0, 10, (2, 81))
+        labels = torch.randint(1, 10, (2, 81))
 
-        carry = model.initial_carry(inputs)
+        carry = model.initial_carry(inputs, labels)
 
         steps = 0
         max_steps = 4
         while steps < max_steps:
-            carry, outputs = model(carry, inputs)
+            carry, outputs = model(carry, inputs, labels)
             steps += 1
             if carry.halted.all():
                 break
@@ -56,12 +60,12 @@ class TestSudokuModelIntegration:
         inputs = torch.randint(0, 10, (2, 81))
         labels = torch.randint(1, 10, (2, 81))
 
-        carry = model.initial_carry(inputs)
-        carry, outputs = model(carry, inputs)
+        carry = model.initial_carry(inputs, labels)
+        carry, outputs = model(carry, inputs, labels)
 
         loss, metrics = compute_act_loss(
             outputs["logits"],
-            labels,
+            carry.current_labels,  # Use carry's labels for puzzle persistence
             outputs["q_halt_logits"],
             carry.halted,
             carry.steps,
@@ -78,12 +82,12 @@ class TestSudokuModelIntegration:
         inputs = torch.randint(0, 10, (2, 81))
         labels = torch.randint(1, 10, (2, 81))
 
-        carry = model.initial_carry(inputs)
-        carry, outputs = model(carry, inputs)
+        carry = model.initial_carry(inputs, labels)
+        carry, outputs = model(carry, inputs, labels)
 
         loss, _ = compute_act_loss(
             outputs["logits"],
-            labels,
+            carry.current_labels,  # Use carry's labels for puzzle persistence
             outputs["q_halt_logits"],
             carry.halted,
             carry.steps,
@@ -104,17 +108,18 @@ class TestSudokuModelIntegration:
         """Carry persists correctly across multiple forward calls."""
         model.eval()
         inputs = torch.randint(0, 10, (2, 81))
+        labels = torch.randint(1, 10, (2, 81))
 
-        carry = model.initial_carry(inputs)
+        carry = model.initial_carry(inputs, labels)
 
         # First forward - carry should be reset (halted=True initially)
-        carry, _ = model(carry, inputs)
+        carry, _ = model(carry, inputs, labels)
         assert torch.all(carry.steps == 1)
 
         # Second forward - carry persists if not halted
         if not carry.halted.all():
             old_steps = carry.steps.clone()
-            carry, _ = model(carry, inputs)
+            carry, _ = model(carry, inputs, labels)
             # Non-halted sequences should have incremented steps
             expected = torch.where(carry.halted, torch.ones_like(old_steps), old_steps + 1)
             # This is tricky because halted resets - just verify it runs

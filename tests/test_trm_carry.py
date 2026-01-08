@@ -52,7 +52,7 @@ class TestTRMCarry:
         assert torch.all(new_carry.z_L[3] == 43.0)
 
     def test_trm_carry_dataclass(self):
-        """TRMCarry wraps TRMInnerCarry with steps and halted."""
+        """TRMCarry wraps TRMInnerCarry with steps, halted, current_inputs, current_labels."""
         inner = TRMInnerCarry(
             z_H=torch.randn(2, 82, 512),
             z_L=torch.randn(2, 82, 512),
@@ -61,11 +61,15 @@ class TestTRMCarry:
             inner_carry=inner,
             steps=torch.tensor([3, 5]),
             halted=torch.tensor([False, True]),
+            current_inputs=torch.randn(2, 81, 512),
+            current_labels=torch.randint(0, 11, (2, 81)),
         )
 
         assert carry.inner_carry.z_H.shape == (2, 82, 512)
         assert carry.steps.tolist() == [3, 5]
         assert carry.halted.tolist() == [False, True]
+        assert carry.current_inputs.shape == (2, 81, 512)
+        assert carry.current_labels.shape == (2, 81)
 
 
 class TestTRMForward:
@@ -78,9 +82,10 @@ class TestTRMForward:
     def test_forward_output_shapes(self, model):
         """forward() returns correct output shapes."""
         input_emb = torch.randn(2, 81, 512)  # No context, forward adds it
-        carry = model.initial_carry(input_emb)
+        labels = torch.randint(0, 11, (2, 81))
+        carry = model.initial_carry(input_emb, labels)
 
-        new_carry, outputs = model.forward(carry, input_emb)
+        new_carry, outputs = model.forward(carry, input_emb, labels)
 
         assert new_carry.inner_carry.z_H.shape == (2, 82, 512)
         assert new_carry.inner_carry.z_L.shape == (2, 82, 512)
@@ -88,13 +93,16 @@ class TestTRMForward:
         assert outputs["q_halt_logits"].shape == (2,)
         assert new_carry.steps.shape == (2,)
         assert new_carry.halted.shape == (2,)
+        assert new_carry.current_inputs.shape == (2, 81, 512)
+        assert new_carry.current_labels.shape == (2, 81)
 
     def test_forward_carry_is_detached(self, model):
         """forward() returns carry with detached tensors."""
         input_emb = torch.randn(2, 81, 512)
-        carry = model.initial_carry(input_emb)
+        labels = torch.randint(0, 11, (2, 81))
+        carry = model.initial_carry(input_emb, labels)
 
-        new_carry, _ = model.forward(carry, input_emb)
+        new_carry, _ = model.forward(carry, input_emb, labels)
 
         assert not new_carry.inner_carry.z_H.requires_grad
         assert not new_carry.inner_carry.z_L.requires_grad
@@ -102,9 +110,10 @@ class TestTRMForward:
     def test_forward_q_halt_initial_value(self, model):
         """forward() q_halt starts near -5 due to bias initialization."""
         input_emb = torch.randn(2, 81, 512)
-        carry = model.initial_carry(input_emb)
+        labels = torch.randint(0, 11, (2, 81))
+        carry = model.initial_carry(input_emb, labels)
 
-        _, outputs = model.forward(carry, input_emb)
+        _, outputs = model.forward(carry, input_emb, labels)
 
         # q_head bias is -5, so initial q_halt should be around -5
         assert torch.all(outputs["q_halt_logits"] < 0), "Initial q_halt should be negative"
@@ -112,7 +121,8 @@ class TestTRMForward:
     def test_initial_carry_halted_true(self, model):
         """initial_carry() starts with halted=True to trigger reset."""
         input_emb = torch.randn(2, 81, 512)
-        carry = model.initial_carry(input_emb)
+        labels = torch.randint(0, 11, (2, 81))
+        carry = model.initial_carry(input_emb, labels)
 
         assert torch.all(carry.halted), "Initial carry should have halted=True"
         assert torch.all(carry.steps == 0), "Initial carry should have steps=0"
@@ -121,22 +131,94 @@ class TestTRMForward:
         """forward() increments step count."""
         model.eval()  # Disable exploration
         input_emb = torch.randn(2, 81, 512)
-        carry = model.initial_carry(input_emb)
+        labels = torch.randint(0, 11, (2, 81))
+        carry = model.initial_carry(input_emb, labels)
 
-        carry, _ = model.forward(carry, input_emb)
+        carry, _ = model.forward(carry, input_emb, labels)
         assert torch.all(carry.steps == 1)
 
-        carry, _ = model.forward(carry, input_emb)
+        carry, _ = model.forward(carry, input_emb, labels)
         assert torch.all(carry.steps == 2)
 
     def test_forward_halts_at_max_steps(self, model):
         """forward() halts when max_steps reached."""
         model.eval()  # Disable exploration
         input_emb = torch.randn(2, 81, 512)
-        carry = model.initial_carry(input_emb)
+        labels = torch.randint(0, 11, (2, 81))
+        carry = model.initial_carry(input_emb, labels)
 
         # Run until max_steps (16)
         for _ in range(16):
-            carry, _ = model.forward(carry, input_emb)
+            carry, _ = model.forward(carry, input_emb, labels)
 
         assert torch.all(carry.halted), "All sequences should halt at max_steps"
+
+    def test_puzzle_persistence_non_halted_keep_original(self, model):
+        """Non-halted sequences keep their original inputs/labels when new batch arrives.
+
+        This is the core fix from objectives.md: non-halted sequences should continue
+        processing their original puzzle, not receive mismatched new batch data.
+        """
+        model.eval()  # Disable exploration
+
+        # Original batch
+        original_inputs = torch.randn(2, 81, 512)
+        original_labels = torch.randint(0, 11, (2, 81))
+
+        # Different "new" batch (simulates next training batch)
+        new_inputs = torch.randn(2, 81, 512) + 100  # Clearly different values
+        new_labels = torch.randint(0, 11, (2, 81)) + 100  # Clearly different values
+
+        # Initialize with original data
+        carry = model.initial_carry(original_inputs, original_labels)
+
+        # First forward - all halted=True, so all sequences get original data
+        carry, _ = model.forward(carry, original_inputs, original_labels)
+
+        # Verify sequences got original data
+        assert torch.allclose(carry.current_inputs, original_inputs)
+        assert torch.equal(carry.current_labels, original_labels)
+
+        # Second forward with NEW batch - non-halted should keep ORIGINAL
+        # At step 1, sequences are not halted (max_steps=16), so they keep original
+        assert not carry.halted.any(), "After 1 step, sequences should not be halted"
+
+        carry, _ = model.forward(carry, new_inputs, new_labels)
+
+        # Non-halted sequences should STILL have original data, NOT new batch
+        assert torch.allclose(carry.current_inputs, original_inputs), \
+            "Non-halted sequences should keep original inputs, not receive new batch"
+        assert torch.equal(carry.current_labels, original_labels), \
+            "Non-halted sequences should keep original labels, not receive new batch"
+
+    def test_puzzle_persistence_halted_get_new_data(self):
+        """Halted sequences receive new batch data on next forward.
+
+        When a sequence halts (completes its puzzle), it should receive
+        fresh data from the new batch on the next forward call.
+        """
+        # Create model with max_steps=2 for quick halting
+        short_model = TRM(seq_len=82, input_dim=512, context_len=1, halt_max_steps=2)
+        short_model.eval()
+
+        original_inputs = torch.randn(2, 81, 512)
+        original_labels = torch.randint(0, 11, (2, 81))
+        new_inputs = torch.randn(2, 81, 512) + 100
+        new_labels = torch.randint(0, 11, (2, 81)) + 100
+
+        carry = short_model.initial_carry(original_inputs, original_labels)
+
+        # Run 2 steps to reach max_steps and halt
+        carry, _ = short_model.forward(carry, original_inputs, original_labels)
+        carry, _ = short_model.forward(carry, original_inputs, original_labels)
+
+        assert torch.all(carry.halted), "All sequences should be halted at max_steps"
+
+        # Now forward with new batch - halted sequences should get NEW data
+        carry, _ = short_model.forward(carry, new_inputs, new_labels)
+
+        # Halted sequences should now have new data
+        assert torch.allclose(carry.current_inputs, new_inputs), \
+            "Halted sequences should receive new inputs on next forward"
+        assert torch.equal(carry.current_labels, new_labels), \
+            "Halted sequences should receive new labels on next forward"

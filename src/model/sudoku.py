@@ -38,15 +38,16 @@ class SudokuModel(nn.Module):
             halt_max_steps=halt_max_steps,
         )
 
-    def initial_carry(self, inputs: torch.Tensor) -> TRMCarry:
+    def initial_carry(self, inputs: torch.Tensor, labels: torch.Tensor) -> TRMCarry:
         """Create initial carry state for a batch."""
         input_emb = self.embedder(inputs)
-        return self.trm.initial_carry(input_emb)
+        return self.trm.initial_carry(input_emb, labels)
 
     def forward(
             self,
             carry: TRMCarry,
             inputs: torch.Tensor,
+            labels: torch.Tensor,
             halt_exploration_prob: float = 0.1,
     ) -> tuple[TRMCarry, dict[str, torch.Tensor]]:
         """Run ONE ACT step.
@@ -54,6 +55,7 @@ class SudokuModel(nn.Module):
         Args:
             carry: Current carry state
             inputs: (B, seq_len) token ids
+            labels: (B, seq_len) target labels
             halt_exploration_prob: Exploration probability (training only)
 
         Returns:
@@ -61,4 +63,4 @@ class SudokuModel(nn.Module):
             outputs: Dict with 'logits' and 'q_halt_logits'
         """
         input_emb = self.embedder(inputs)
-        return self.trm(carry, input_emb, halt_exploration_prob)
+        return self.trm(carry, input_emb, labels, halt_exploration_prob)

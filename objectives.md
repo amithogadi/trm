@@ -50,3 +50,14 @@ See trm_quest implementation:
 ## Verification
 
 After fix, loss should be stable around 0.8-1.2 without spikes to 3-6.
+
+## Status: COMPLETE
+
+All required changes implemented:
+
+1. ✅ **TRMCarry**: Added `current_inputs` and `current_labels` fields
+2. ✅ **TRM.initial_carry**: Accepts labels, initializes with `torch.empty_like()`
+3. ✅ **TRM.forward**: Persists inputs/labels for non-halted sequences, uses `current_inputs` for inner model
+4. ✅ **SudokuModel**: Updated to pass labels through to TRM
+5. ✅ **train.py**: Uses `carry.current_labels` for loss computation
+6. ✅ **Tests**: 32 tests pass, including 2 puzzle persistence tests

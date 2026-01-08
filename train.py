@@ -158,11 +158,11 @@ def evaluate(
         inputs = inputs.to(device)
         labels = labels.to(device)
 
-        carry = base_model.initial_carry(inputs)
+        carry = base_model.initial_carry(inputs, labels)
 
         with torch.autocast('cuda', dtype=torch.bfloat16):
             for _ in range(max_steps):
-                carry, outputs = model(carry, inputs)
+                carry, outputs = model(carry, inputs, labels)
                 if carry.halted.all():
                     break
 
@@ -309,16 +309,16 @@ def main():
 
             # Initialize carry if None (first batch)
             if carry is None:
-                carry = base_model.initial_carry(inputs)
+                carry = base_model.initial_carry(inputs, labels)
 
             # ONE ACT step per batch (matching trm_quest)
             with torch.autocast('cuda', dtype=torch.bfloat16):
-                carry, outputs = model(carry, inputs)
+                carry, outputs = model(carry, inputs, labels)
 
-            # Compute loss for ALL sequences, metrics for halted only
+            # Compute loss using carry's current_labels (persisted for non-halted sequences)
             loss, metrics = compute_act_loss(
                 outputs["logits"],
-                labels,
+                carry.current_labels,
                 outputs["q_halt_logits"],
                 carry.halted,
                 carry.steps,
