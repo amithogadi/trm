@@ -46,10 +46,12 @@ def compute_act_loss(
             "steps": torch.where(valid, steps, 0).sum(),
         }
 
-    # Loss for ALL sequences (matching trm_quest: per-seq normalized then summed)
+    # Loss for ALL sequences
+    # lm_loss: average per-token loss (already normalized)
+    # q_halt_loss: average per-sequence loss (need to normalize by batch_size)
     lm_loss = stablemax_cross_entropy(logits, labels, ignore_index=-100)
     q_halt_loss = F.binary_cross_entropy_with_logits(
-        q_halt_logits, seq_is_correct.float(), reduction="sum"
+        q_halt_logits, seq_is_correct.float(), reduction="mean"  # Changed from "sum" to "mean"
     )
 
     loss = lm_loss + 0.5 * q_halt_loss
