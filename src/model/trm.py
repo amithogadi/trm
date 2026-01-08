@@ -240,4 +240,4 @@ class TRM(nn.Module):
                 )
                 halted = halted & (new_steps >= min_halt_steps)
 
-        return TRMCarry(new_inner, new_steps, halted, new_current_inputs, new_current_labels), outputs
+        return TRMCarry(new_inner, new_steps, halted, new_current_inputs.detach(), new_current_labels.detach()), outputs
