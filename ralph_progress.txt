@@ -1,0 +1,21 @@
+Iteration 1: Added current_inputs and current_labels fields to TRMCarry dataclass (puzzle persistence)
+Review 1: TRMCarry has new fields but initial_carry/forward not yet updated - code incomplete, tests will fail until next iterations
+Iteration 2: Updated initial_carry to accept labels param and initialize current_inputs/labels with empty_like. forward still incomplete.
+Review 2: initial_carry change correct. forward (line 235) still returns only 3 args - will fail until iter 3 fixes it.
+Iteration 3: Updated forward to accept labels, persist inputs/labels for non-halted seqs, use current_inputs for inner model, return full TRMCarry.
+Review 3: forward changes correct. halted_view handles 2D/3D inputs properly. carry.current_labels available for train.py loss computation.
+Iteration 4: Updated train.py - initial_carry/forward now pass labels, loss uses carry.current_labels (core fix for puzzle persistence).
+Review 4: Found SudokuModel didn't pass labels through - FIXED. initial_carry and forward now accept+pass labels to TRM.
+Review 4b: SudokuModel changes verified correct - labels not embedded (correct), passed through to TRM. Full call chain works.
+Iteration 5: Updated evaluate function - initial_carry/forward now pass labels (API consistency). Core implementation complete.
+Review 5: evaluate changes correct. In eval, batch is constant so labels==carry.current_labels - using labels for accuracy is fine.
+Iteration 6: Updated tests for new API (labels param). All 30 tests pass. Implementation complete.
+Review 6: Test changes correct - validate new API, check current_inputs/labels shapes, use carry.current_labels for loss. No issues.
+Iteration 7: Added 2 critical tests: test_puzzle_persistence_non_halted_keep_original, test_puzzle_persistence_halted_get_new_data. 32 tests pass.
+Review 7: Tests correct. Minor fix: removed unused model fixture param from test_puzzle_persistence_halted_get_new_data.
+Review 7b: Verified minor fix correct - removed unused parameter. No issues.
+Iteration 8: Final verification - all 32 tests pass. Objectives complete. Updated scratch pad with summary.
+Iteration 9: Deep review of TRM.forward implementation - checked dtype consistency, gradient flow, memory, device handling, trm_quest alignment. All correct.
+Iteration 10: Reviewed train.py loop - carry persistence, loss with current_labels, DDP handling, checkpoint resume all correct. Implementation complete.
+Iteration 11: Marked objectives.md as COMPLETE with status section listing all implemented changes.
+Iteration 12: Fixed RuntimeError "backward through graph twice" - detached new_current_inputs/labels before storing in carry.

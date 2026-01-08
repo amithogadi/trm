@@ -340,9 +340,29 @@ def main():
                 count = metrics["count"].item()
                 exact_acc = metrics["exact_accuracy"].item() / max(count, 1)
                 avg_steps = metrics["steps"].item() / max(count, 1)
+                loss_val = loss.item()
+
+                # Debug: detect loss spikes and print diagnostic info
+                if loss_val > 3.0:
+                    with torch.no_grad():
+                        logit_min = outputs["logits"].min().item()
+                        logit_max = outputs["logits"].max().item()
+                        label_min = carry.current_labels.min().item()
+                        label_max = carry.current_labels.max().item()
+                        batch_label_min = labels.min().item()
+                        batch_label_max = labels.max().item()
+                        labels_match = torch.equal(carry.current_labels, labels)
+                    print(
+                        f"SPIKE Step {global_step} | Loss: {loss_val:.4f} | "
+                        f"Logits: [{logit_min:.2f}, {logit_max:.2f}] | "
+                        f"CarryLabels: [{label_min}, {label_max}] | "
+                        f"BatchLabels: [{batch_label_min}, {batch_label_max}] | "
+                        f"LabelsMatch: {labels_match}"
+                    )
+
                 print(
                     f"Step {global_step} | Epoch {epoch+1}/{args.epochs} | "
-                    f"Loss: {loss.item():.4f} | ExactAcc: {exact_acc:.4f} | "
+                    f"Loss: {loss_val:.4f} | ExactAcc: {exact_acc:.4f} | "
                     f"AvgSteps: {avg_steps:.1f} | Halted: {count} | LR: {lr:.2e}"
                 )
 
